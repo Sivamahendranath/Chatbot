@@ -1,5 +1,3 @@
-#📚 Smart PDF Assistant (Offline Chatbot) An intelligent, voice-enabled, offline chatbot that lets you chat with any PDF file in natural language. It uses local Large Language Models (LLMs) 
-
 📚 Smart PDF Assistant (Offline Chatbot)
 An intelligent, voice-enabled, offline chatbot that lets you chat with any PDF file in natural language. It uses local Large Language Models (LLMs) through Ollama, LangChain for document retrieval, and Streamlit for a friendly interface — all running entirely on your local machine with no internet required once setup is complete.
 

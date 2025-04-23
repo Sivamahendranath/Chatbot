@@ -1,1 +1,18 @@
 streamlit
+torch
+PyMuPDF  # for fitz
+speechrecognition
+langchain
+langchain-community
+faiss-cpu  # or faiss-gpu if you have GPU
+sentence-transformers  # for HuggingFaceEmbeddings
+requests
+matplotlib
+pandas
+numpy
+scipy  # sometimes required for langchain tools
+pydub  # useful for audio handling
+transformers  # often needed for LLMs and embedding models
+accelerate  # for running transformers models more efficiently
+python-dotenv  # optional, for config management
+openai  # only if needed, can be omitted for full offline

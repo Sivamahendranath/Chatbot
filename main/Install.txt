@@ -1,0 +1,90 @@
+🧠 What is Ollama?
+Ollama lets you run large language models (LLMs) like Mistral, LLaMA2, and Gemma locally on your machine, with no internet required after setup.
+
+✅ Step-by-Step Installation of Ollama
+🔹 Step 1: Visit Ollama Website
+Go to https://ollama.com
+
+🔹 Step 2: Download Ollama Installer
+Choose the appropriate installer based on your OS:
+
+Windows – .exe installer
+
+macOS – .pkg installer
+
+Linux – Install via terminal (see below)
+
+🔹 Step 3: Install Ollama
+✅ On Windows/macOS
+Run the downloaded installer
+
+Follow the on-screen instructions to install Ollama
+
+Once installed, it runs a local server at http://localhost:11434
+
+✅ On Linux (Debian/Ubuntu)
+Open a terminal and run:
+
+bash
+Copy
+Edit
+curl -fsSL https://ollama.com/install.sh | sh
+Then start Ollama:
+
+bash
+Copy
+Edit
+ollama serve
+🔹 Step 4: Pull a Model
+After installation, open a terminal and pull a model. Example:
+
+bash
+Copy
+Edit
+ollama pull mistral
+This will download the Mistral model (a fast, lightweight LLM). You can also use:
+
+ollama pull llama2
+
+ollama pull gemma
+
+ollama pull codellama
+
+🔹 Step 5: Confirm It’s Running
+You can check if Ollama is active by visiting:
+
+bash
+Copy
+Edit
+http://localhost:11434/api/tags
+Or run:
+
+bash
+Copy
+Edit
+ollama list
+It should show installed models.
+
+🔹 Step 6: Start the Ollama Server (if not already running)
+bash
+Copy
+Edit
+ollama serve
+You can keep this running in the background while using your chatbot app.
+
+💬 Example: Running With Your Chatbot
+In your Python code or Streamlit app, the chatbot connects to the local Ollama server at:
+
+arduino
+Copy
+Edit
+http://localhost:11434
+When your chatbot calls the LLM, Ollama responds with answers from the local model — no internet required.
+
+🧪 Optional: Test a Model
+You can chat with a model directly from the terminal:
+
+bash
+Copy
+Edit
+ollama run mistral

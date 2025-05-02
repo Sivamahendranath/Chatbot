@@ -1,4 +1,4 @@
-📚 Smart Document Assistant (Offline Chatbot with PDF & URL Support)
+📚 Smart Document Assistant (Offline Chatbot with PDF & URL Support)  [demo:https://www.linkedin.com/posts/sivamahendranath-ragimanu-68a94823b_python-ai-langchain-activity-7323997293370597378-goIQ?utm_source=share&utm_medium=member_desktop&rcm=ACoAADvDGcoB0zRF3XGC2XoPR3VSw0RN6dCCCNo]
 This project is an intelligent, fully offline chatbot application built using Streamlit, LangChain, FAISS, and Ollama, designed to help users chat with documents (PDFs and Web URLs). It uses local LLMs via Ollama, supports voice input, provides document insights and statistics, and presents everything in a clean, user-friendly UI.
 
 🎯 Purpose

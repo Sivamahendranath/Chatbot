@@ -23,6 +23,12 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import pandas as pd
 import warnings
+from bs4 import BeautifulSoup
+from lxml.html.clean import Cleaner
+from newspaper import Article
+import html2text
+import trafilatura
+from urllib.parse import urlparse
 warnings.filterwarnings("ignore")
 
 # Ensure an event loop is running
@@ -160,6 +166,13 @@ def local_css():
             text-overflow: ellipsis;
             max-width: 100%;
         }
+        .tab-section {
+            margin-top: 15px;
+            margin-bottom: 15px;
+        }
+        .url-input {
+            margin-bottom: 15px;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -199,7 +212,213 @@ def extract_text_from_pdf(pdf_file):
     os.unlink(tmp_path)
     return text, metadata
 
-def process_text(text):
+def normalize_url(url):
+    """Ensure URL has proper scheme"""
+    if not url.startswith(('http://', 'https://')):
+        return 'https://' + url
+    return url
+
+def get_domain(url):
+    """Extract domain from URL"""
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    return domain
+
+def fetch_web_content(url):
+    """Fetch web content from a URL with enhanced error handling and user-agent"""
+    try:
+        # Normalize URL if needed
+        url = normalize_url(url)
+        
+        # Use a realistic user agent
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # Make request with timeout and headers
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        
+        # Check if response is valid HTML
+        content_type = resp.headers.get('Content-Type', '')
+        if 'text/html' not in content_type and 'application/xhtml+xml' not in content_type:
+            return None, f"URL returned non-HTML content: {content_type}"
+        
+        return resp.text, None
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if hasattr(e, 'response') else "unknown"
+        return None, f"HTTP Error: {status_code}"
+    except requests.exceptions.ConnectionError:
+        return None, "Connection Error: Failed to connect to the server"
+    except requests.exceptions.Timeout:
+        return None, "Timeout Error: The request timed out"
+    except requests.exceptions.RequestException as e:
+        return None, f"Request Error: {str(e)}"
+    except Exception as e:
+        return None, f"Unexpected error: {str(e)}"
+
+def extract_text_from_url(url):
+    """Enhanced function to extract text from a URL using multiple methods"""
+    html, error = fetch_web_content(url)
+    
+    if error:
+        return None, None, f"Error fetching URL: {error}"
+    
+    if not html:
+        return None, None, "No content received from the URL"
+    
+    metadata = {
+        "source": url,
+        "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "domain": get_domain(url)
+    }
+    
+    # Method 1: Trafilatura - specialized for article extraction
+    trafilatura_text = ""
+    try:
+        downloaded = trafilatura.extract(html, include_comments=False, include_tables=True, output_format="text")
+        if downloaded:
+            trafilatura_text = downloaded
+            metadata["extraction_method"] = "trafilatura"
+    except Exception as e:
+        metadata["trafilatura_error"] = str(e)
+    
+    # Method 2: Newspaper3k - good for news articles
+    newspaper_text = ""
+    try:
+        article = Article(url)
+        article.set_html(html)
+        article.parse()
+        
+        # Extract metadata
+        if article.title:
+            metadata["title"] = article.title
+        if article.authors:
+            metadata["authors"] = ", ".join(article.authors)
+        if article.publish_date:
+            metadata["article_date"] = article.publish_date.strftime("%Y-%m-%d") if hasattr(article.publish_date, "strftime") else str(article.publish_date)
+            
+        newspaper_text = article.text
+    except Exception as e:
+        metadata["newspaper_error"] = str(e)
+    
+    # Method 3: BeautifulSoup - general HTML parsing
+    bs4_text = ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Get title from soup if not already found
+        if "title" not in metadata and soup.title:
+            metadata["title"] = soup.title.text.strip()
+        
+        # Extract metadata
+        meta_tags = soup.find_all("meta")
+        for tag in meta_tags:
+            if tag.get("name") in ["description", "author", "keywords"]:
+                metadata[tag.get("name")] = tag.get("content")
+            elif tag.get("property") in ["og:title", "og:description", "og:site_name"]:
+                prop = tag.get("property")[3:]  # Remove 'og:' prefix
+                metadata[f"og_{prop}"] = tag.get("content")
+        
+        # Remove unwanted elements
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "iframe", "noscript"]):
+            element.decompose()
+            
+        # Get article content if available
+        article_content = None
+        for elem in ["article", "main", "#content", ".content", "#main", ".main", ".post", ".article"]:
+            if elem.startswith(("#", ".")):
+                article_content = soup.select_one(elem)
+            else:
+                article_content = soup.find(elem)
+                
+            if article_content:
+                break
+        
+        # If article content is found, use it
+        if article_content:
+            paragraphs = article_content.find_all("p")
+            bs4_text = "\n\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+        else:
+            # Fallback to all paragraphs
+            paragraphs = soup.find_all("p")
+            bs4_text = "\n\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+            
+        # Get all headings for structure
+        headings = []
+        for i in range(1, 7):
+            for h in soup.find_all(f'h{i}'):
+                text = h.get_text().strip()
+                if text:  # Only add non-empty headings
+                    headings.append(f"Heading {i}: {text}")
+        
+        # Combine headings and paragraphs if headings found
+        if headings:
+            bs4_text = "\n\n".join(headings) + "\n\n" + bs4_text
+    
+    except Exception as e:
+        metadata["bs4_error"] = str(e)
+    
+    # Method 4: HTML2Text as a fallback
+    html2text_result = ""
+    try:
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = True
+        h.ignore_tables = False
+        h.single_line_break = True
+        html2text_result = h.handle(html)
+    except Exception as e:
+        metadata["html2text_error"] = str(e)
+    
+    # Select the best extracted text based on quality and length
+    candidates = [
+        (trafilatura_text, "trafilatura", len(trafilatura_text.split())),
+        (newspaper_text, "newspaper3k", len(newspaper_text.split())),
+        (bs4_text, "beautifulsoup", len(bs4_text.split())),
+        (html2text_result, "html2text", len(html2text_result.split()))
+    ]
+    
+    # Sort by word count (descending)
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    
+    # Choose the best candidate with at least 50 words
+    final_text = None
+    for text, method, word_count in candidates:
+        if word_count >= 50:
+            final_text = text
+            metadata["extraction_method"] = method
+            metadata["word_count"] = word_count
+            break
+    
+    # If no good candidate found
+    if not final_text:
+        # Try combining all methods as a last resort
+        combined_text = "\n\n".join([t for t, _, _ in candidates if t])
+        if len(combined_text.split()) >= 30:
+            final_text = combined_text
+            metadata["extraction_method"] = "combined"
+            metadata["word_count"] = len(combined_text.split())
+        else:
+            return None, None, "Failed to extract meaningful text from the URL"
+        
+    # Clean up the final text
+    final_text = "\n".join([line.strip() for line in final_text.splitlines() if line.strip()])
+    
+    # Add a few additional metadata points
+    metadata["text_length"] = len(final_text)
+    metadata["extraction_success"] = True
+    
+    return final_text, metadata, None
+
+def process_text(text, source_type="pdf"):
     """Process text into chunks with improved context preservation"""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -209,17 +428,23 @@ def process_text(text):
     )
     chunks = text_splitter.split_text(text)
     
-    # Add page number metadata to chunks where available
+    # Add source type and page number metadata to chunks where available
     enhanced_chunks = []
     for chunk in chunks:
-        page_marker = None
-        for line in chunk.split("\n"):
-            if line.startswith("--- Page ") and line.endswith(" ---"):
-                page_marker = line.replace("--- Page ", "").replace(" ---", "")
-                break
-        
-        # Remove page markers from the actual text
-        clean_chunk = chunk.replace("\n--- Page ", " [Page ").replace(" ---\n", "] ")
+        # For PDFs with page markers
+        if source_type == "pdf":
+            page_marker = None
+            for line in chunk.split("\n"):
+                if line.startswith("--- Page ") and line.endswith(" ---"):
+                    page_marker = line.replace("--- Page ", "").replace(" ---", "")
+                    break
+            
+            # Remove page markers from the actual text
+            clean_chunk = chunk.replace("\n--- Page ", " [Page ").replace(" ---\n", "] ")
+        else:
+            # For web content
+            clean_chunk = chunk
+            
         enhanced_chunks.append(clean_chunk)
     
     return enhanced_chunks
@@ -396,7 +621,7 @@ def get_document_statistics(text, metadata=None):
 
 def export_chat_history(chat_history):
     """Export chat history to markdown"""
-    markdown = "# PDF Chat Session\n\n"
+    markdown = "# Document Chat Session\n\n"
     markdown += f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     
     for i, exchange in enumerate(chat_history):
@@ -435,26 +660,30 @@ def init_session_state():
         st.session_state.vectorstore = None
     if "qa_chain" not in st.session_state:
         st.session_state.qa_chain = None
-    if "pdf_processed" not in st.session_state:
-        st.session_state.pdf_processed = False
-    if "pdf_name" not in st.session_state:
-        st.session_state.pdf_name = None
+    if "document_processed" not in st.session_state:
+        st.session_state.document_processed = False
+    if "document_name" not in st.session_state:
+        st.session_state.document_name = None
     if "last_query" not in st.session_state:
         st.session_state.last_query = None
-    if "pdf_metadata" not in st.session_state:
-        st.session_state.pdf_metadata = None
-    if "pdf_text" not in st.session_state:
-        st.session_state.pdf_text = None
+    if "document_metadata" not in st.session_state:
+        st.session_state.document_metadata = None
+    if "document_text" not in st.session_state:
+        st.session_state.document_text = None
     if "use_memory" not in st.session_state:
         st.session_state.use_memory = True
     if "dark_mode" not in st.session_state:
         st.session_state.dark_mode = False
     if "input_text" not in st.session_state:
         st.session_state.input_text = ""
+    if "document_source" not in st.session_state:
+        st.session_state.document_source = None  # "pdf" or "url"
+    if "url" not in st.session_state:
+        st.session_state.url = None
 
 def main():
     st.set_page_config(
-        page_title="Smart PDF Assistant",
+        page_title="Smart Document Assistant",
         page_icon="📚",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -470,7 +699,7 @@ def main():
     with col1:
         st.image("https://img.icons8.com/color/96/000000/pdf.png", width=80)
     with col2:
-        st.title("Smart PDF Assistant")
+        st.title("Smart Document Assistant")
         st.markdown("Your intelligent document analysis companion powered by Ollama")
     
     # Sidebar configuration
@@ -517,7 +746,7 @@ def main():
             )
         
         # Update model settings
-        if st.session_state.pdf_processed and st.button("Update Model Settings", key="update_model"):
+        if st.session_state.document_processed and st.button("Update Model Settings", key="update_model"):
             with st.spinner("Updating model settings..."):
                 llm = get_llm(temperature, ollama_model)
                 if llm:
@@ -533,268 +762,276 @@ def main():
         
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # PDF Stats and Export section
-    if st.session_state.pdf_processed:
+    # Stats and Export section
+    if st.session_state.document_processed:
         st.sidebar.markdown("### 📊 Document Information")
         with st.sidebar.container():
             st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
             
-            if st.session_state.pdf_metadata:
-                st.markdown(f"**File:** {st.session_state.pdf_name}")
-                st.markdown(f"**Pages:** {st.session_state.pdf_metadata.get('page_count', 'Unknown')}")
-                st.markdown(f"**Title:** {st.session_state.pdf_metadata.get('title', 'Unknown')}")
+            if st.session_state.document_metadata:
+                st.markdown(f"**Source:** {st.session_state.document_source.upper()}")
+                st.markdown(f"**Name:** {st.session_state.document_name}")
                 
-                # Word count and other stats
-                if st.session_state.pdf_text:
-                    word_count = len(st.session_state.pdf_text.split())
-                    st.markdown(f"**Words:** {word_count:,}")
+                # Display source-specific metadata
+                if st.session_state.document_source == "pdf" and "page_count" in st.session_state.document_metadata:
+                    st.markdown(f"**Pages:** {st.session_state.document_metadata.get('page_count', 'Unknown')}")
+                    st.markdown(f"**Title:** {st.session_state.document_metadata.get('title', 'Unknown')}")
+                    st.markdown(f"**Author:** {st.session_state.document_metadata.get('author', 'Unknown')}")
+                elif st.session_state.document_source == "url" and "domain" in st.session_state.document_metadata:
+                    st.markdown(f"**Domain:** {st.session_state.document_metadata.get('domain', 'Unknown')}")
+                    st.markdown(f"**Title:** {st.session_state.document_metadata.get('title', st.session_state.document_metadata.get('og_title', 'Unknown'))}")
+                    if "word_count" in st.session_state.document_metadata:
+                        st.markdown(f"**Word Count:** {st.session_state.document_metadata.get('word_count', 'Unknown')}")
+            
+            # Document statistics
+            if st.session_state.document_text:
+                with st.expander("📈 View Statistics"):
+                    total_words = len(st.session_state.document_text.split())
+                    total_chars = len(st.session_state.document_text)
+                    st.markdown(f"**Total Words:** {total_words}")
+                    st.markdown(f"**Total Characters:** {total_chars}")
                     
-                    # Generate and show visualization
-                    if st.button("Generate Insights", key="generate_insights"):
-                        viz_buffer = generate_text_visualization(st.session_state.pdf_text)
-                        st.image(viz_buffer)
+                    # Generate and display visualization
+                    if total_words > 50:  # Only if enough words
+                        viz_buffer = generate_text_visualization(st.session_state.document_text)
+                        st.image(viz_buffer, caption="Word Frequency", use_container_width=True)
             
             # Export functionality
             if st.session_state.chat_history:
-                if st.button("Export Chat History"):
-                    markdown_export = export_chat_history(st.session_state.chat_history)
-                    b64 = base64.b64encode(markdown_export.encode()).decode()
-                    now = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"pdf_chat_export_{now}.md"
-                    href = f'<a href="data:file/markdown;base64,{b64}" download="{filename}">📥 Download Markdown</a>'
+                if st.button("📥 Export Chat History"):
+                    markdown_text = export_chat_history(st.session_state.chat_history)
+                    
+                    # Create download button for the markdown file
+                    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"chat_history_{time_str}.md"
+                    
+                    # Convert to bytes for download
+                    b64 = base64.b64encode(markdown_text.encode()).decode()
+                    href = f'<a href="data:file/markdown;base64,{b64}" download="{filename}">Click here to download</a>'
                     st.markdown(href, unsafe_allow_html=True)
-                    log_activity("Exported chat history")
+                    
+                    log_activity("Export chat history")
+            
+            # Reset button
+            if st.button("🔄 Reset Assistant"):
+                for key in list(st.session_state.keys()):
+                    if key not in ["dark_mode"]:
+                        del st.session_state[key]
+                st.rerun()
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     # Main content area
-    main_col1, main_col2 = st.columns([2, 3])
+    col1, col2 = st.columns([2, 3])
     
-    # PDF Upload Section
-    with main_col1:
-        st.markdown("### 📄 Upload Document")
+    # Document upload section
+    with col1:
         st.markdown('<div class="upload-section">', unsafe_allow_html=True)
+        st.markdown("### 📄 Upload Your Document")
         
-        pdf_file = st.file_uploader("Choose a PDF file", type="pdf", help="Select a PDF document to analyze")
+        # Tabs for different input methods
+        tab1, tab2 = st.tabs(["Upload PDF", "Enter URL"])
         
-        if pdf_file:
-            # Display file info
-            file_details = {
-                "Filename": pdf_file.name,
-                "File size": f"{pdf_file.size / 1024:.2f} KB"
-            }
-            st.json(file_details)
-            
-            # Process PDF button
-            process_col1, process_col2 = st.columns(2)
-            process_button = process_col1.button("Process PDF", key="process_pdf")
-            reset_button = process_col2.button("Reset", key="reset_pdf")
-            
-            if reset_button:
-                st.session_state.pdf_processed = False
-                st.session_state.pdf_name = None
-                st.session_state.vectorstore = None
-                st.session_state.qa_chain = None
-                st.session_state.chat_history = []
-                st.session_state.pdf_metadata = None
-                st.session_state.pdf_text = None
-                st.session_state.input_text = ""
-                st.rerun()
-            
-            if process_button or (pdf_file and (not st.session_state.pdf_processed or st.session_state.pdf_name != pdf_file.name)):
-                with st.spinner("Processing PDF... This may take a moment."):
-                    # Extract text and metadata
-                    text, metadata = extract_text_from_pdf(pdf_file)
-                    st.session_state.pdf_text = text
-                    st.session_state.pdf_metadata = metadata
-                    
-                    # Process text into chunks
-                    chunks = process_text(text)
-                    
-                    # Get embeddings model and create vector store
-                    embeddings = get_embeddings_model()
-                    st.session_state.vectorstore = create_vector_store(chunks, embeddings)
-                    
-                    # Initialize LLM and QA chain
-                    llm = get_llm(temperature, ollama_model)
-                    if llm:
-                        st.session_state.qa_chain = setup_qa_chain(
-                            st.session_state.vectorstore, 
-                            llm,
-                            use_memory=st.session_state.use_memory
-                        )
-                        st.session_state.pdf_processed = True
-                        st.session_state.pdf_name = pdf_file.name
-                        st.session_state.chat_history = []  # Clear chat history for new PDF
+        with tab1:
+            uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+            if uploaded_file is not None:
+                if st.button("Process PDF", key="process_pdf"):
+                    with st.spinner("Processing PDF..."):
+                        # Extract text from PDF
+                        text, metadata = extract_text_from_pdf(uploaded_file)
                         
-                        st.success(f"✅ Successfully processed: {pdf_file.name}")
-                        log_activity("PDF processed", f"File: {pdf_file.name}, Size: {pdf_file.size / 1024:.2f} KB")
-                    else:
-                        st.error(f"❌ Failed to initialize Ollama with model '{ollama_model}'")
-                        st.info(f"Try running: ollama pull {ollama_model}")
-        else:
-            st.info("Please upload a PDF document to get started", icon="ℹ️")
+                        if text:
+                            # Process text into chunks
+                            chunks = process_text(text, source_type="pdf")
+                            
+                            # Get embeddings model
+                            embeddings = get_embeddings_model()
+                            
+                            # Create vector store
+                            vectorstore = create_vector_store(chunks, embeddings)
+                            
+                            # Get LLM
+                            llm = get_llm(temperature, ollama_model)
+                            
+                            if llm:
+                                # Setup QA chain
+                                qa_chain = setup_qa_chain(
+                                    vectorstore, 
+                                    llm,
+                                    use_memory=st.session_state.use_memory
+                                )
+                                
+                                # Store in session state
+                                st.session_state.document_processed = True
+                                st.session_state.vectorstore = vectorstore
+                                st.session_state.qa_chain = qa_chain
+                                st.session_state.document_name = uploaded_file.name
+                                st.session_state.document_metadata = metadata
+                                st.session_state.document_text = text
+                                st.session_state.document_source = "pdf"
+                                st.session_state.chat_history = []
+                                
+                                st.success(f"✅ PDF processed successfully: {uploaded_file.name}")
+                                log_activity("PDF processed", uploaded_file.name)
+                            else:
+                                st.error("❌ Failed to initialize LLM. Is Ollama running?")
+                        else:
+                            st.error("❌ Failed to extract text from PDF")
         
-        # Document preview 
-        if st.session_state.pdf_processed and st.session_state.pdf_text:
-            with st.expander("Document Preview"):
-                preview_text = st.session_state.pdf_text[:1500] + "..." if len(st.session_state.pdf_text) > 1500 else st.session_state.pdf_text
-                st.text_area("Document Content (Preview)", preview_text, height=300, disabled=True)
+        with tab2:
+            url = st.text_input("Enter webpage URL", key="url_input")
+            if url:
+                if st.button("Process URL", key="process_url"):
+                    with st.spinner("Processing webpage..."):
+                        # Extract text from URL
+                        text, metadata, error = extract_text_from_url(url)
+                        
+                        if text and not error:
+                            # Process text into chunks
+                            chunks = process_text(text, source_type="url")
+                            
+                            # Get embeddings model
+                            embeddings = get_embeddings_model()
+                            
+                            # Create vector store
+                            vectorstore = create_vector_store(chunks, embeddings)
+                            
+                            # Get LLM
+                            llm = get_llm(temperature, ollama_model)
+                            
+                            if llm:
+                                # Setup QA chain
+                                qa_chain = setup_qa_chain(
+                                    vectorstore, 
+                                    llm,
+                                    use_memory=st.session_state.use_memory
+                                )
+                                
+                                # Store in session state
+                                st.session_state.document_processed = True
+                                st.session_state.vectorstore = vectorstore
+                                st.session_state.qa_chain = qa_chain
+                                st.session_state.document_name = metadata.get("title", url)
+                                st.session_state.document_metadata = metadata
+                                st.session_state.document_text = text
+                                st.session_state.document_source = "url"
+                                st.session_state.url = url
+                                st.session_state.chat_history = []
+                                
+                                st.success(f"✅ URL processed successfully")
+                                log_activity("URL processed", url)
+                            else:
+                                st.error("❌ Failed to initialize LLM. Is Ollama running?")
+                        else:
+                            st.error(f"❌ {error}")
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Preview document if processed
+        if st.session_state.document_processed and st.session_state.document_text:
+            with st.expander("📝 Document Preview"):
+                preview_text = st.session_state.document_text[:2000] + "..." if len(st.session_state.document_text) > 2000 else st.session_state.document_text
+                st.text_area("Document content", preview_text, height=300)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
     
-    # Chat Interface
-    with main_col2:
-        st.markdown("### 💬 Chat with Your Document")
+    # Chat interface
+    with col2:
         st.markdown('<div class="chat-section">', unsafe_allow_html=True)
+        st.markdown("### 💬 Chat with Your Document")
         
-        if not st.session_state.pdf_processed:
-            st.info("Upload and process a PDF to start asking questions", icon="👈")
-        else:
-            # Voice input button - place before text input
-            voice_col1, voice_col2, voice_col3 = st.columns([1, 1, 1])
+        # Display chat history
+        if st.session_state.chat_history:
+            for chat in st.session_state.chat_history:
+                st.markdown(f'<div class="user-bubble"><div class="chat-header">You:</div>{chat["user"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="bot-bubble"><div class="chat-header">Assistant:</div>{chat["bot"]}</div>', unsafe_allow_html=True)
+                
+                if "sources" in chat and chat["sources"]:
+                    with st.expander("View Sources"):
+                        st.markdown(f'<div class="source-box">{chat["sources"]}</div>', unsafe_allow_html=True)
+        
+        # Input area
+        if st.session_state.document_processed:
+            input_col1, input_col2 = st.columns([6, 1])
             
-            with voice_col1:
-                if st.button("🎙️ Voice Input", key="voice_button"):
+            with input_col1:
+                user_input = st.text_area("Your question", value=st.session_state.input_text, height=80, key="question_input")
+            
+            with input_col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                voice_button = st.button("🎤", help="Voice Input")
+                if voice_button:
                     handle_voice_input()
                     st.rerun()
             
-            with voice_col3:
-                if st.button("Clear Chat", key="clear_chat"):
-                    st.session_state.chat_history = []
-                    st.session_state.last_query = None
-                    st.session_state.input_text = ""
-                    log_activity("Chat history cleared")
+            # Submit button
+            submit_col1, submit_col2 = st.columns([1, 6])
+            with submit_col1:
+                submit_button = st.button("Send")
+            with submit_col2:
+                # Voice input button
+                if st.session_state.qa_chain is None:
+                    st.warning("⚠️ LLM not initialized. Is Ollama running?")
+            
+            # Process user input when submit button is clicked
+            if submit_button and user_input.strip():
+                # Store the query
+                query = user_input.strip()
+                st.session_state.last_query = query
+                st.session_state.input_text = ""  # Clear input
+                
+                # Create a placeholder for the assistant's response
+                response_placeholder = st.empty()
+                response_placeholder.markdown('<div class="bot-bubble" style="background-color: black; color: white;"><div class="chat-header" style="color: white;">Assistant:</div>Thinking...</div>', unsafe_allow_html=True)                
+                try:
+                    # Get response from QA chain
+                    start_time = time.time()
+                    result = st.session_state.qa_chain({"query": query})
+                    end_time = time.time()
+                    
+                    answer = result.get("result", "I couldn't find an answer in the document.")
+                    source_docs = result.get("source_documents", [])
+                    
+                    # Format sources
+                    sources_text = ""
+                    if source_docs:
+                        sources_text = "**Sources:**\n\n"
+                        for i, doc in enumerate(source_docs[:3]):  # Show top 3 sources
+                            content = doc.page_content
+                            # Truncate if too long
+                            if len(content) > 300:
+                                content = content[:300] + "..."
+                            sources_text += f"Source {i+1}:\n{content}\n\n"
+                    
+                    # Calculate time taken
+                    time_taken = round(end_time - start_time, 2)
+                    time_text = f"Response time: {time_taken} seconds"
+                    
+                    # Update chat history
+                    chat_entry = {
+                        "user": query,
+                        "bot": answer,
+                        "time": time_text
+                    }
+                    
+                    if sources_text:
+                        chat_entry["sources"] = sources_text
+                    
+                    st.session_state.chat_history.append(chat_entry)
+                    
+                    # Remove the placeholder and show the complete chat history
+                    response_placeholder.empty()
+                    
+                    # Log activity
+                    log_activity("Question answered", f"Q: {query[:50]}...")
+                    
+                    # Rerun to refresh chat display
                     st.rerun()
-            
-            # Input area with pre-populated value from session state
-            query = st.text_input(
-                "Ask a question about your document:", 
-                key="query_input",
-                value=st.session_state.input_text
-            )
-            
-            # Clear the input_text after it's used
-            if st.session_state.input_text:
-                st.session_state.input_text = ""
-            
-            with voice_col2:
-                submit_button = st.button("Submit Question", key="submit_button")
-            
-            # Process query
-            if submit_button or (query and query.strip() and st.session_state.pdf_processed and 
-                             (st.session_state.last_query is None or st.session_state.last_query != query)):
-                if not query:
-                    st.warning("Please enter a question")
-                else:
-                    current_query = query  # Store the current query to use in this iteration
-                    st.session_state.last_query = current_query
-                    with st.spinner("Generating answer..."):
-                        try:
-                            start_time = time.time()
-                            # Get response and properly extract answer and sources
-                            response = st.session_state.qa_chain({"query": current_query})
-                            end_time = time.time()
-                            
-                            # Extract the answer from the response
-                            if "result" in response:
-                                answer = response["result"]
-                            else:
-                                # Fallback for different response formats
-                                answer = response.get("answer", response.get("output", "No answer found"))
-                            
-                            # Get source documents
-                            sources = response.get("source_documents", [])
-                            
-                            # Process and format source documents
-                            source_texts = []
-                            for i, doc in enumerate(sources):
-                                source_text = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-                                # Extract page numbers if available
-                                page_info = ""
-                                if "[Page " in source_text:
-                                    import re
-                                    page_match = re.search(r'\[Page (\d+)\]', source_text)
-                                    if page_match:
-                                        page_info = f" (Page {page_match.group(1)})"
-                                
-                                source_texts.append(f"Source {i+1}{page_info}: {source_text}")
-                            
-                            source_info = "\n\n".join(source_texts)
-                            
-                            # Record the exchange
-                            st.session_state.chat_history.append({
-                                "user": current_query, 
-                                "bot": answer,
-                                "sources": source_info,
-                                "time": f"Response time: {end_time - start_time:.2f} seconds",
-                                "timestamp": datetime.now().strftime("%H:%M:%S")
-                            })
-                            
-                            # Log the activity
-                            log_activity("Question answered", f"Q: {current_query[:50]}...")
-                            
-                            # Clear input by forcing a rerun
-                            st.session_state.input_text = ""
-                            st.rerun()
-                            
-                        except Exception as e:
-                            st.error(f"Error generating answer: {str(e)}")
-                            log_activity("Error generating answer", str(e))
-            
-            # Display chat history
-            if st.session_state.chat_history:
-                st.markdown("#### Conversation History")
-                for i, message in enumerate(reversed(st.session_state.chat_history)):
-                    # User message
-                    st.markdown(f'<div class="user-bubble"><div class="chat-header">You:</div>{message["user"]}</div>', unsafe_allow_html=True)
-                    
-                    # Bot message
-                    st.markdown(f'<div class="bot-bubble"><div class="chat-header">AI Assistant:</div>{message["bot"]}</div>', unsafe_allow_html=True)
-                    
-                    # Show sources in an expander
-                    with st.expander("Show Sources"):
-                        st.markdown('<div class="source-box">', unsafe_allow_html=True)
-                        st.markdown(f"**Sources:**\n{message['sources']}")
-                        st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Show timing info
-                    st.markdown(f'<div class="metadata">{message["time"]} | {message["timestamp"]}</div>', unsafe_allow_html=True)
-                    
-                    # Add separator between messages
-                    if i < len(st.session_state.chat_history) - 1:
-                        st.markdown("---")
-            else:
-                if st.session_state.pdf_processed:
-                    st.info("Start asking questions about your document!", icon="💡")
-                    
-                    # Suggest some questions based on the document
-                    st.markdown("#### Suggested Questions:")
-                    example_questions = [
-                        "What is the main topic of this document?",
-                        "Can you summarize this document for me?",
-                        "What are the key points in this document?",
-                        f"What information does this document contain about {st.session_state.pdf_name.split('.')[0]}?",
-                        "Are there any tables or figures in this document? What do they show?"
-                    ]
-                    
-                    for question in example_questions:
-                        if st.button(question, key=f"suggest_{hash(question)}"):
-                            st.session_state.input_text = question
-                            st.rerun()
-                        
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style="text-align: center; color: #888;">
-        Smart PDF Assistant | Powered by Ollama, LangChain & Streamlit
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+                except Exception as e:
+                    response_placeholder.error(f"Error: {str(e)}")
+                    log_activity("Error in QA", str(e))
+        else:
+            st.info("📤 Please upload and process a document first")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
